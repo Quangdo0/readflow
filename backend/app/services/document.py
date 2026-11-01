@@ -20,6 +20,10 @@ class DocumentForbiddenError(Exception):
     pass
 
 
+class DocumentConflictError(Exception):
+    pass
+
+
 class DocumentService:
     def __init__(
         self,
@@ -102,13 +106,26 @@ class DocumentService:
                 f"Document {document_id} not found"
             )
 
-        if data.title is not None:
-            document.title = data.title
+        if data.version != document.version:
+            raise DocumentConflictError(
+                f"Document {document_id} version conflict"
+            )
 
-        if data.content is not None:
-            document.content = data.content
+        updated_document = (
+            await self.repository.update_if_version_matches(
+                document_id=document_id,
+                expected_version=data.version,
+                title=data.title,
+                content=data.content,
+            )
+        )
 
-        return await self.repository.save(document)
+        if updated_document is None:
+            raise DocumentConflictError(
+                f"Document {document_id} version conflict"
+            )
+
+        return updated_document
 
     async def delete_document(
         self,

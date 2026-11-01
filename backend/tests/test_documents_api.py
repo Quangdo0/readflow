@@ -44,6 +44,7 @@ def make_document(owner_id: int = 1) -> Document:
         title="User A Notes",
         content="Private reading notes",
         status="uploaded",
+        version=1,
         created_at=now,
         updated_at=now,
         deleted_at=None,
@@ -81,7 +82,12 @@ def override_document_dependencies(
         (
             "PATCH",
             "/documents/1",
-            {"json": {"title": "Changed"}},
+            {
+                "json": {
+                    "version": 1,
+                    "title": "Changed",
+                }
+            },
         ),
         ("DELETE", "/documents/1", {}),
     ],
@@ -121,6 +127,7 @@ def test_owner_can_read_own_document():
     assert response.status_code == 200
     assert response.json()["id"] == document.id
     assert response.json()["title"] == document.title
+    assert response.json()["version"] == document.version
 
 
 def test_normal_non_owner_read_returns_404():
@@ -147,14 +154,66 @@ def test_normal_non_owner_update_returns_404():
 
     response = client.patch(
         "/documents/1",
-        json={"title": "Changed"},
+        json={
+            "version": 99,
+            "title": "Changed",
+        },
     )
 
     assert response.status_code == 404
     assert response.json() == {
         "detail": "Document 1 not found"
     }
-    repository.save.assert_not_awaited()
+    repository.update_if_version_matches.assert_not_awaited()
+
+
+def test_owner_update_returns_incremented_version():
+    owner = make_user(1)
+    document = make_document(owner_id=owner.id)
+    updated_document = make_document(owner_id=owner.id)
+    updated_document.title = "Changed"
+    updated_document.version = 2
+    repository = AsyncMock()
+    repository.get_by_id.return_value = document
+    repository.update_if_version_matches.return_value = (
+        updated_document
+    )
+    override_document_dependencies(owner, repository)
+
+    response = client.patch(
+        "/documents/1",
+        json={
+            "version": 1,
+            "title": "Changed",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["title"] == "Changed"
+    assert response.json()["version"] == 2
+
+
+def test_stale_update_returns_409():
+    owner = make_user(1)
+    document = make_document(owner_id=owner.id)
+    document.version = 2
+    repository = AsyncMock()
+    repository.get_by_id.return_value = document
+    override_document_dependencies(owner, repository)
+
+    response = client.patch(
+        "/documents/1",
+        json={
+            "version": 1,
+            "title": "Stale Update",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Document 1 version conflict"
+    }
+    repository.update_if_version_matches.assert_not_awaited()
 
 
 def test_normal_non_owner_delete_returns_404():
@@ -195,14 +254,17 @@ def test_admin_update_of_another_users_document_returns_403():
 
     response = client.patch(
         "/documents/1",
-        json={"title": "Changed"},
+        json={
+            "version": 99,
+            "title": "Changed",
+        },
     )
 
     assert response.status_code == 403
     assert response.json() == {
         "detail": "Document 1 cannot be updated"
     }
-    repository.save.assert_not_awaited()
+    repository.update_if_version_matches.assert_not_awaited()
 
 
 def test_admin_can_delete_another_users_document():

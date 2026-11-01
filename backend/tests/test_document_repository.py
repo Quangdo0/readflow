@@ -102,3 +102,98 @@ async def test_soft_delete_sets_aware_utc_timestamp_and_persists():
     assert before <= document.deleted_at <= after
     db.commit.assert_awaited_once_with()
     db.delete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_if_version_matches_is_atomic():
+    db = AsyncMock()
+    updated_document = Document(
+        id=1,
+        user_id=1,
+        title="Updated Notes",
+        content="Private notes",
+        status="uploaded",
+        version=2,
+        deleted_at=None,
+    )
+    result = Mock()
+    result.scalar_one_or_none.return_value = updated_document
+    db.execute.return_value = result
+    repository = DocumentRepository(db)
+
+    document = await repository.update_if_version_matches(
+        document_id=1,
+        expected_version=1,
+        title="Updated Notes",
+        content=None,
+    )
+
+    statement = db.execute.await_args.args[0]
+    query = compile_query(statement)
+    assert document is updated_document
+    assert document.version == 2
+    assert "UPDATE documents" in query
+    assert "documents.id = 1" in query
+    assert "documents.version = 1" in query
+    assert "documents.deleted_at IS NULL" in query
+    assert "version=(documents.version + 1)" in query
+    assert "RETURNING" in query
+    db.commit.assert_awaited_once_with()
+    db.rollback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_if_version_matches_returns_none_on_conflict():
+    db = AsyncMock()
+    result = Mock()
+    result.scalar_one_or_none.return_value = None
+    db.execute.return_value = result
+    repository = DocumentRepository(db)
+
+    document = await repository.update_if_version_matches(
+        document_id=1,
+        expected_version=1,
+        title="Stale Notes",
+    )
+
+    assert document is None
+    db.rollback.assert_awaited_once_with()
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_two_updates_with_same_version_do_not_overwrite():
+    db = AsyncMock()
+    first_document = Document(
+        id=1,
+        user_id=1,
+        title="First Update",
+        content="Private notes",
+        status="uploaded",
+        version=2,
+        deleted_at=None,
+    )
+    first_result = Mock()
+    first_result.scalar_one_or_none.return_value = first_document
+    second_result = Mock()
+    second_result.scalar_one_or_none.return_value = None
+    db.execute.side_effect = [first_result, second_result]
+    repository = DocumentRepository(db)
+
+    first = await repository.update_if_version_matches(
+        document_id=1,
+        expected_version=1,
+        title="First Update",
+    )
+    second = await repository.update_if_version_matches(
+        document_id=1,
+        expected_version=1,
+        title="Second Update",
+    )
+
+    assert first is first_document
+    assert first.title == "First Update"
+    assert first.version == 2
+    assert second is None
+    assert db.commit.await_count == 1
+    assert db.rollback.await_count == 1

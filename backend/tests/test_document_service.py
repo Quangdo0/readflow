@@ -7,6 +7,7 @@ from app.models.document import Document
 from app.models.user import User, UserRole
 from app.schemas.document import DocumentCreate, DocumentUpdate
 from app.services.document import (
+    DocumentConflictError,
     DocumentForbiddenError,
     DocumentNotFoundError,
     DocumentService,
@@ -35,6 +36,7 @@ def make_document(
         title="Reading Notes",
         content="Private notes",
         status="uploaded",
+        version=1,
         deleted_at=deleted_at,
     )
 
@@ -106,9 +108,18 @@ async def test_owner_update_succeeds():
     owner = make_user(1)
     document = make_document(owner_id=owner.id)
     repository.get_by_id.return_value = document
-    repository.save.return_value = document
     service = DocumentService(repository)
-    data = DocumentUpdate(title="Updated Notes")
+    data = DocumentUpdate(
+        version=1,
+        title="Updated Notes",
+    )
+
+    updated_document = make_document(owner_id=owner.id)
+    updated_document.title = "Updated Notes"
+    updated_document.version = 2
+    repository.update_if_version_matches.return_value = (
+        updated_document
+    )
 
     result = await service.update_document(
         document.id,
@@ -116,9 +127,101 @@ async def test_owner_update_succeeds():
         owner,
     )
 
-    assert result is document
-    assert document.title == "Updated Notes"
-    repository.save.assert_awaited_once_with(document)
+    assert result is updated_document
+    assert result.version == 2
+    repository.update_if_version_matches.assert_awaited_once_with(
+        document_id=document.id,
+        expected_version=1,
+        title="Updated Notes",
+        content=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_repeated_updates_increment_versions_monotonically():
+    repository = AsyncMock()
+    owner = make_user(1)
+    version_one = make_document(owner_id=owner.id)
+    version_two = make_document(owner_id=owner.id)
+    version_two.title = "Second Version"
+    version_two.version = 2
+    version_three = make_document(owner_id=owner.id)
+    version_three.title = "Third Version"
+    version_three.version = 3
+    repository.get_by_id.side_effect = [
+        version_one,
+        version_two,
+    ]
+    repository.update_if_version_matches.side_effect = [
+        version_two,
+        version_three,
+    ]
+    service = DocumentService(repository)
+
+    first = await service.update_document(
+        version_one.id,
+        DocumentUpdate(
+            version=1,
+            title="Second Version",
+        ),
+        owner,
+    )
+    second = await service.update_document(
+        version_two.id,
+        DocumentUpdate(
+            version=2,
+            title="Third Version",
+        ),
+        owner,
+    )
+
+    assert first.version == 2
+    assert second.version == 3
+    assert repository.update_if_version_matches.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_stale_version_raises_conflict_before_update():
+    repository = AsyncMock()
+    owner = make_user(1)
+    document = make_document(owner_id=owner.id)
+    document.version = 2
+    repository.get_by_id.return_value = document
+    service = DocumentService(repository)
+
+    with pytest.raises(DocumentConflictError):
+        await service.update_document(
+            document.id,
+            DocumentUpdate(
+                version=1,
+                title="Stale Update",
+            ),
+            owner,
+        )
+
+    repository.update_if_version_matches.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_atomic_update_miss_raises_conflict():
+    repository = AsyncMock()
+    owner = make_user(1)
+    document = make_document(owner_id=owner.id)
+    repository.get_by_id.return_value = document
+    repository.update_if_version_matches.return_value = None
+    service = DocumentService(repository)
+
+    with pytest.raises(DocumentConflictError):
+        await service.update_document(
+            document.id,
+            DocumentUpdate(
+                version=1,
+                title="Racing Update",
+            ),
+            owner,
+        )
+
+    repository.update_if_version_matches.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -132,11 +235,14 @@ async def test_admin_update_of_another_users_document_is_forbidden():
     with pytest.raises(DocumentForbiddenError):
         await service.update_document(
             document.id,
-            DocumentUpdate(title="Changed"),
+            DocumentUpdate(
+                version=99,
+                title="Changed",
+            ),
             admin,
         )
 
-    repository.save.assert_not_awaited()
+    repository.update_if_version_matches.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -150,11 +256,14 @@ async def test_normal_non_owner_update_raises_not_found():
     with pytest.raises(DocumentNotFoundError):
         await service.update_document(
             document.id,
-            DocumentUpdate(title="Changed"),
+            DocumentUpdate(
+                version=99,
+                title="Changed",
+            ),
             user,
         )
 
-    repository.save.assert_not_awaited()
+    repository.update_if_version_matches.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -228,11 +337,14 @@ async def test_deleted_document_cannot_be_updated():
     with pytest.raises(DocumentNotFoundError):
         await service.update_document(
             document.id,
-            DocumentUpdate(title="Changed"),
+            DocumentUpdate(
+                version=1,
+                title="Changed",
+            ),
             owner,
         )
 
-    repository.save.assert_not_awaited()
+    repository.update_if_version_matches.assert_not_awaited()
 
 
 @pytest.mark.asyncio

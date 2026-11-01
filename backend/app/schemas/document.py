@@ -9,6 +9,7 @@ class DocumentCreate(BaseModel):
 
 
 class DocumentUpdate(BaseModel):
+    version: int = Field(ge=1)
     title: str | None = Field(
         default=None,
         min_length=1,
@@ -29,5 +30,6 @@ class DocumentRead(BaseModel):
     title: str
     content: str
     status: str
+    version: int
     created_at: datetime
     updated_at: datetime

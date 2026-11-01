@@ -17,6 +17,7 @@ from app.schemas.document import (
     DocumentUpdate,
 )
 from app.services.document import (
+    DocumentConflictError,
     DocumentForbiddenError,
     DocumentNotFoundError,
     DocumentService,
@@ -130,6 +131,11 @@ async def update_document(
     except DocumentForbiddenError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+    except DocumentConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
 

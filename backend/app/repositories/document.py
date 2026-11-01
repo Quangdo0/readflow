@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.document import Document
@@ -83,6 +83,50 @@ class DocumentRepository:
     ) -> Document:
         await self.db.commit()
         await self.db.refresh(document)
+
+        return document
+
+    async def update_if_version_matches(
+        self,
+        document_id: int,
+        expected_version: int,
+        title: str | None = None,
+        content: str | None = None,
+    ) -> Document | None:
+        values = {
+            "version": Document.version + 1,
+        }
+
+        if title is not None:
+            values["title"] = title
+
+        if content is not None:
+            values["content"] = content
+
+        statement = (
+            update(Document)
+            .where(
+                Document.id == document_id,
+                Document.version == expected_version,
+                Document.deleted_at.is_(None),
+            )
+            .values(**values)
+            .returning(Document)
+        )
+
+        result = await self.db.execute(
+            statement,
+            execution_options={
+                "populate_existing": True
+            },
+        )
+        document = result.scalar_one_or_none()
+
+        if document is None:
+            await self.db.rollback()
+            return None
+
+        await self.db.commit()
 
         return document
 

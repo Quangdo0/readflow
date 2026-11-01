@@ -38,6 +38,12 @@ class Document(Base):
         default="uploaded",
     )
 
+    version: Mapped[int] = mapped_column(
+        default=1,
+        server_default="1",
+        nullable=False,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
